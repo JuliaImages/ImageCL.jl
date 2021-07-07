@@ -1,45 +1,47 @@
-import OpenCL
-using Colors, FileIO, Images
+module GaussianBlur
 
+using OpenCL
+import  OpenCL: cl
+# using Colors, FileIO, Images
+using ..ImageCL
+using Images
+# using ImageView
 
-image = map(RGBA{Float32}, load(joinpath(homedir(), "surface.png"))).data
+export blur!, blur
 
-const cl = OpenCL
-device, ctx, queue = cl.create_compute_context()
-const gauss_kernel_src = load_kernel("gaussian_blur.cl")
-kernel = map(Float32, gaussian2d(2.0, (5,5)))
-# create opencl buffer objects
-# copies to the device initiated when the kernel function is called
-img_buff = cl.Buffer(RGBA{Float32}, ctx, (:r, :copy), hostbuf=image)
-blurred_buff = cl.Buffer(RGBA{Float32}, ctx, :w, length(image))
-kernel_buff = cl.Buffer(Float32, ctx, (:r, :copy), hostbuf=kernel)
+const GAUSS_KERNEL_SOURCE = ImageCL.load_kernel( "gaussian_blur.cl" )
 
-# build the program and construct a kernel object
-gauss_program = cl.build!(cl.Program(ctx, source=gauss_kernel_src))
-gauss_cl_func = cl.Kernel(gauss_program, "fir_ver_blur")
+"""
+    blur!{T,N}( inArray::Array{T,N}, outArray::Array{T,N}; samplingAlg = "linear_3d" )
+change the value inplace of outArray.
+blurAlg = "fir_ver_blur"
+"""
+function blur!{T,N}( inArray::Array{T,N}, kernel::Array;
+                        blurAlg = "fir_ver_blur" )
+    device, ctx, queue = OpenCL.cl.create_compute_context()
+    gauss_program = cl.Program(ctx, source=GAUSS_KERNEL_SOURCE) |> cl.build!
+    gauss_cl_func = cl.Kernel(gauss_program, blurAlg)
+    @show gauss_cl_func
 
-# const global float4 *src_buf,
-# const int src_width,
-# global float4 *dst_buf,
-# constant float *cmatrix,
-# const int matrix_length,
-# const int yoff
-
-# call the kernel object with global size set to the size our arrays
-
-gauss_cl_func[queue, size(image)](
-    img_buff, Cint(size(image, 1)),
-    blurred_buff,
-    kernel_buff, Cint(length(kernel)),
-    Cint(0)
-)
-
-# perform a blocking read of the result from the device
-result_img = reshape(cl.read(queue, blurred_buff), size(image))
-
-Base.clamp(x::Float32) = isnan(x) ? U8(0) : U8(clamp(x, 0.0f0, 1.0f0))
-
-img = map(result_img) do x
-    RGBA{U8}(clamp(red(x)), clamp(green(x)), clamp(blue(x)), clamp(alpha(x)))
+    inBuffer    = cl.Buffer(RGBA{Float32},  ctx, (:r, :copy),   hostbuf = inArray)
+    outBuffer   = cl.Buffer(RGBA{Float32},  ctx, :w,            length(inArray))
+    kernelBuffer= cl.Buffer(Float32,        ctx, (:r, :copy),   hostbuf=kernel)
+    gauss_cl_func[queue,size(inArray)](
+                            inBuffer,       Cint(size(inArray, 1)),
+                            outBuffer,
+                            kernelBuffer,   Cint(length(kernel)),
+                            Cint(0));
+    ret = reshape(cl.read(queue, outBuffer), size(inArray))
+    return ret
 end
-save("test.png", img)
+
+function blur{T,N}( inArray::Array{T,N};
+                    kernelSigmas::Tuple=(2.0, 2.0),
+                    kernelSize::Tuple=(5,5),
+                    blurAlg = "fir_ver_blur")
+    outArray = similar(inArray)
+    kernel = map(Float32, Images.Kernel.gaussian(kernelSigmas, kernelSize)).parent
+    blur!(inArray, kernel, outArray; blurAlg=blurAlg)
+end
+
+end # end of module
